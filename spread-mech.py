@@ -138,6 +138,18 @@ def build_excel_style_table(
     short_strike,
     covered_call_strike
 ):
+    """
+    Formulas verified directly against the source spreadsheet:
+    - Call spreads          = Call sold / Call spread cost
+    - Marginal IV            = ((IV_i * DTE_i) - (IV_prior * DTE_prior)) / (DTE_i - DTE_prior)
+    - Total profit           = Call spreads * Profit/spread
+    - Underlying share       = Covered call strike (constant)
+    - Combined value         = Total profit + Underlying share
+    - Return                 = Total profit / Current share price
+    - Return/DTE             = Return / DTE
+    - Return/Marginal DTE    = (Return_i - Return_prior) / (DTE_i - DTE_prior)
+    """
+
     width = short_strike - long_strike
 
     dtes = term_df["DTE"].tolist()
@@ -153,8 +165,8 @@ def build_excel_style_table(
     returns_per_dte = []
     returns_per_marginal_dte = []
 
-    prev_dte = 0
-    prev_combined_value = current_price
+    prev_dte = None
+    prev_return = None
 
     for i in range(len(term_df)):
         dte = dtes[i]
@@ -162,6 +174,8 @@ def build_excel_style_table(
         proceeds = call_sold_premiums[i]
         cost = spread_costs[i]
 
+        # Marginal IV — linear interpolation, matches
+        # =((C11*C13)-(B11*B13))/(C13-B13)
         if i == 0:
             marginal_iv = iv
         else:
@@ -170,41 +184,51 @@ def build_excel_style_table(
             time_gap = dte - prior_dte
 
             if time_gap > 0:
-                forward_var = (
-                    (iv ** 2) * dte - (prior_iv ** 2) * prior_dte
+                marginal_iv = (
+                    (iv * dte) - (prior_iv * prior_dte)
                 ) / time_gap
-                marginal_iv = np.sqrt(max(forward_var, 0))
             else:
                 marginal_iv = iv
 
         marginal_ivs.append(round(marginal_iv, 1))
 
+        # Call spreads = Call sold / Call spread cost
         num_spreads = proceeds / cost if cost > 0 else 0
         num_spreads_list.append(round(num_spreads, 1))
 
+        # Total profit = Call spreads * Profit/spread (width)
         total_profit = num_spreads * width
         total_profits.append(round(total_profit, 1))
 
+        # Combined value = Total profit + Underlying share (covered call strike)
         combined_value = total_profit + covered_call_strike
         combined_values.append(round(combined_value, 1))
 
-        ret = (combined_value - current_price) / current_price
+        # Return = Total profit / Current share price
+        ret = total_profit / current_price
         returns.append(round(ret * 100, 1))
 
+        # Return/DTE = Return / DTE
         ret_per_dte = (ret / dte) if dte > 0 else 0
         returns_per_dte.append(round(ret_per_dte * 100, 1))
 
-        marginal_dte = dte - prev_dte
-        marginal_ret = (
-            (combined_value - prev_combined_value) / current_price
-        )
-        ret_per_marginal_dte = (
-            (marginal_ret / marginal_dte) if marginal_dte > 0 else 0
-        )
+        # Return/Marginal DTE = (Return_i - Return_prior) / (DTE_i - DTE_prior)
+        if i == 0:
+            ret_per_marginal_dte = ret_per_dte
+        else:
+            marginal_dte = dte - prev_dte
+
+            if marginal_dte > 0:
+                ret_per_marginal_dte = (
+                    (ret - prev_return) / marginal_dte
+                )
+            else:
+                ret_per_marginal_dte = 0
+
         returns_per_marginal_dte.append(round(ret_per_marginal_dte * 100, 1))
 
         prev_dte = dte
-        prev_combined_value = combined_value
+        prev_return = ret
 
     excel_rows = {
         f"Call bought: {long_strike:.0f}": term_df["Call Bought Premium"].tolist(),
@@ -385,7 +409,7 @@ try:
     )
 
     st.download_button(
-        label="Generate & Download Excel Sheet",
+        label="📥 Generate & Download Excel Sheet",
         data=excel_bytes,
         file_name=f"BE_call_spread_{long_strike:.0f}_{short_strike:.0f}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
