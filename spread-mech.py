@@ -385,7 +385,7 @@ try:
     )
 
     st.download_button(
-        label="📥 Generate & Download Excel Sheet",
+        label="Generate & Download Excel Sheet",
         data=excel_bytes,
         file_name=f"BE_call_spread_{long_strike:.0f}_{short_strike:.0f}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
