@@ -139,7 +139,7 @@ def fetch_spread_term_structure(ticker_symbol, long_strike, short_strike, covere
             long_iv = float(long_row["impliedVolatility"]) * 100
 
             # Covered call premium and IV pulled from its OWN strike,
-            # separate from the spread's Hi strike -- this is the fix.
+            # separate from the spread's Hi strike.
             if covered_call_row is not None:
                 covered_call_iv = float(covered_call_row["impliedVolatility"]) * 100
                 covered_call_premium = float(covered_call_row["mid"])
@@ -215,8 +215,6 @@ def build_excel_style_table(
     ivs_cc = term_df["Implied Vol (Covered Call)"].tolist()
     call_sold_display_premiums = term_df["Call Sold Premium"].tolist()
 
-    # This is the fix: use the COVERED CALL premium to fund the
-    # spreads, not the spread's own Hi-strike premium.
     call_sold_premiums = term_df["Covered Call Premium"].tolist()
 
     spread_costs = term_df["Call Spread Cost"].tolist()
@@ -248,8 +246,6 @@ def build_excel_style_table(
         proceeds = call_sold_premiums[i]
         cost = spread_costs[i]
 
-        # Marginal IV — linear interpolation, matches
-        # =((C11*C13)-(B11*B13))/(C13-B13)
         if i == 0:
             marginal_iv = iv_hi
         else:
@@ -266,27 +262,21 @@ def build_excel_style_table(
 
         marginal_ivs.append(round(marginal_iv, 1))
 
-        # Call spreads = Covered Call Premium / Call spread cost
         num_spreads = proceeds / cost if cost > 0 else 0
         num_spreads_list.append(round(num_spreads, 1))
 
-        # Total profit = Call spreads * Profit/spread (width)
         total_profit = num_spreads * width
         total_profits.append(round(total_profit, 1))
 
-        # Combined value = Total profit + Underlying share (covered call strike)
         combined_value = total_profit + covered_call_strike
         combined_values.append(round(combined_value, 1))
 
-        # Return = Total profit / Current share price
         ret = total_profit / current_price
         returns.append(round(ret * 100, 1))
 
-        # Return/DTE = Return / DTE
         ret_per_dte = (ret / dte) if dte > 0 else 0
         returns_per_dte.append(round(ret_per_dte * 100, 1))
 
-        # Return/Marginal DTE = (Return_i - Return_prior) / (DTE_i - DTE_prior)
         if i == 0:
             ret_per_marginal_dte = ret_per_dte
         else:
@@ -303,8 +293,6 @@ def build_excel_style_table(
 
         prev_dte = dte
         prev_return = ret
-
-        # ---- Delta section ----
 
         hi_delta = calculate_call_delta(
             spot=current_price,
@@ -482,8 +470,6 @@ try:
         for _, row in all_available_expirations.iterrows()
     ]
 
-    # Defaults to showing every available expiration; he can
-    # remove any individually using the "x" on each pill.
     default_selection = expiration_options
 
     selected_expiration_labels = st.multiselect(
@@ -529,17 +515,9 @@ try:
             f"Note: your covered call strike (${covered_call_strike:.0f}) "
             f"is different from the spread's Hi strike (${short_strike:.0f}). "
             f"The premium used to fund your spreads comes from the "
-            f"covered call, and is now calculated separately from the "
+            f"covered call, and is calculated separately from the "
             f"spread's own Hi-strike premium."
         )
-
-    st.caption(
-        "Delta values are calculated using the Black-Scholes model "
-        "from live Yahoo Finance data. They approximate, but may "
-        "not exactly match, delta figures shown on other platforms "
-        "like Barchart, due to differences in volatility inputs "
-        "and model assumptions."
-    )
 
     st.markdown("---")
 
