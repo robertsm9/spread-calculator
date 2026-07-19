@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from scipy.stats import norm
 from datetime import datetime
 from io import BytesIO
 
@@ -11,6 +12,7 @@ from io import BytesIO
 # =========================================================
 
 TICKER_SYMBOL = "BE"
+RISK_FREE_RATE = 0.03456  # matches the 3.456 shown in his sheet, as a decimal
 
 
 # =========================================================
@@ -46,6 +48,27 @@ def get_option_row(calls_df, target_strike):
     return matching_rows.iloc[0]
 
 
+def calculate_call_delta(spot, strike, dte, iv_percent, risk_free_rate):
+    """
+    Standard Black-Scholes call delta = N(d1).
+    """
+
+    if dte <= 0 or iv_percent <= 0 or spot <= 0 or strike <= 0:
+        return 0.0
+
+    iv = iv_percent / 100
+    t = dte / 365
+
+    d1 = (
+        np.log(spot / strike)
+        + (risk_free_rate + 0.5 * iv ** 2) * t
+    ) / (iv * np.sqrt(t))
+
+    delta = norm.cdf(d1)
+
+    return round(float(delta), 5)
+
+
 @st.cache_data(ttl=1800)
 def fetch_current_price(ticker_symbol):
     ticker = yf.Ticker(ticker_symbol)
@@ -61,7 +84,7 @@ def fetch_current_price(ticker_symbol):
 
 
 @st.cache_data(ttl=1800)
-def fetch_spread_term_structure(ticker_symbol, long_strike, short_strike):
+def fetch_spread_term_structure(ticker_symbol, long_strike, short_strike, covered_call_strike):
     ticker = yf.Ticker(ticker_symbol)
     available_expirations = list(ticker.options)
 
@@ -90,6 +113,7 @@ def fetch_spread_term_structure(ticker_symbol, long_strike, short_strike):
 
             long_row = get_option_row(calls_df, long_strike)
             short_row = get_option_row(calls_df, short_strike)
+            covered_call_row = get_option_row(calls_df, covered_call_strike)
 
             if long_row is None or short_row is None:
                 continue
@@ -106,6 +130,12 @@ def fetch_spread_term_structure(ticker_symbol, long_strike, short_strike):
                 continue
 
             short_iv = float(short_row["impliedVolatility"]) * 100
+            long_iv = float(long_row["impliedVolatility"]) * 100
+
+            if covered_call_row is not None:
+                covered_call_iv = float(covered_call_row["impliedVolatility"]) * 100
+            else:
+                covered_call_iv = short_iv
 
             rows.append({
                 "Expiration": expiration,
@@ -113,6 +143,8 @@ def fetch_spread_term_structure(ticker_symbol, long_strike, short_strike):
                 "Call Bought Premium": round(long_premium, 2),
                 "Call Sold Premium": round(short_premium, 2),
                 "Implied Vol (Hi)": round(short_iv, 1),
+                "Implied Vol (Lo)": round(long_iv, 1),
+                "Implied Vol (Covered Call)": round(covered_call_iv, 1),
                 "Call Spread Cost": round(net_debit, 2)
             })
 
@@ -138,22 +170,12 @@ def build_excel_style_table(
     short_strike,
     covered_call_strike
 ):
-    """
-    Formulas verified directly against the source spreadsheet:
-    - Call spreads          = Call sold / Call spread cost
-    - Marginal IV            = ((IV_i * DTE_i) - (IV_prior * DTE_prior)) / (DTE_i - DTE_prior)
-    - Total profit           = Call spreads * Profit/spread
-    - Underlying share       = Covered call strike (constant)
-    - Combined value         = Total profit + Underlying share
-    - Return                 = Total profit / Current share price
-    - Return/DTE             = Return / DTE
-    - Return/Marginal DTE    = (Return_i - Return_prior) / (DTE_i - DTE_prior)
-    """
-
     width = short_strike - long_strike
 
     dtes = term_df["DTE"].tolist()
     ivs = term_df["Implied Vol (Hi)"].tolist()
+    ivs_lo = term_df["Implied Vol (Lo)"].tolist()
+    ivs_cc = term_df["Implied Vol (Covered Call)"].tolist()
     call_sold_premiums = term_df["Call Sold Premium"].tolist()
     spread_costs = term_df["Call Spread Cost"].tolist()
 
@@ -165,19 +187,27 @@ def build_excel_style_table(
     returns_per_dte = []
     returns_per_marginal_dte = []
 
+    hi_deltas = []
+    lo_deltas = []
+    covered_call_deltas = []
+    spread_delta_per_unit = []
+    long_call_spread_total_delta = []
+    covered_call_delta_contributions = []
+    total_position_deltas = []
+
     prev_dte = None
     prev_return = None
 
     for i in range(len(term_df)):
         dte = dtes[i]
-        iv = ivs[i]
+        iv_hi = ivs[i]
+        iv_lo = ivs_lo[i]
+        iv_cc = ivs_cc[i]
         proceeds = call_sold_premiums[i]
         cost = spread_costs[i]
 
-        # Marginal IV — linear interpolation, matches
-        # =((C11*C13)-(B11*B13))/(C13-B13)
         if i == 0:
-            marginal_iv = iv
+            marginal_iv = iv_hi
         else:
             prior_iv = ivs[i - 1]
             prior_dte = dtes[i - 1]
@@ -185,34 +215,28 @@ def build_excel_style_table(
 
             if time_gap > 0:
                 marginal_iv = (
-                    (iv * dte) - (prior_iv * prior_dte)
+                    (iv_hi * dte) - (prior_iv * prior_dte)
                 ) / time_gap
             else:
-                marginal_iv = iv
+                marginal_iv = iv_hi
 
         marginal_ivs.append(round(marginal_iv, 1))
 
-        # Call spreads = Call sold / Call spread cost
         num_spreads = proceeds / cost if cost > 0 else 0
         num_spreads_list.append(round(num_spreads, 1))
 
-        # Total profit = Call spreads * Profit/spread (width)
         total_profit = num_spreads * width
         total_profits.append(round(total_profit, 1))
 
-        # Combined value = Total profit + Underlying share (covered call strike)
         combined_value = total_profit + covered_call_strike
         combined_values.append(round(combined_value, 1))
 
-        # Return = Total profit / Current share price
         ret = total_profit / current_price
         returns.append(round(ret * 100, 1))
 
-        # Return/DTE = Return / DTE
         ret_per_dte = (ret / dte) if dte > 0 else 0
         returns_per_dte.append(round(ret_per_dte * 100, 1))
 
-        # Return/Marginal DTE = (Return_i - Return_prior) / (DTE_i - DTE_prior)
         if i == 0:
             ret_per_marginal_dte = ret_per_dte
         else:
@@ -230,6 +254,50 @@ def build_excel_style_table(
         prev_dte = dte
         prev_return = ret
 
+        hi_delta = calculate_call_delta(
+            spot=current_price,
+            strike=short_strike,
+            dte=dte,
+            iv_percent=iv_hi,
+            risk_free_rate=RISK_FREE_RATE
+        )
+
+        lo_delta = calculate_call_delta(
+            spot=current_price,
+            strike=long_strike,
+            dte=dte,
+            iv_percent=iv_lo,
+            risk_free_rate=RISK_FREE_RATE
+        )
+
+        covered_call_delta = calculate_call_delta(
+            spot=current_price,
+            strike=covered_call_strike,
+            dte=dte,
+            iv_percent=iv_cc,
+            risk_free_rate=RISK_FREE_RATE
+        )
+
+        one_spread_delta = lo_delta - hi_delta
+        total_spread_delta = num_spreads * one_spread_delta
+        covered_call_delta_contribution = -covered_call_delta
+
+        total_position_delta = (
+            1.0
+            + covered_call_delta_contribution
+            + total_spread_delta
+        )
+
+        hi_deltas.append(hi_delta)
+        lo_deltas.append(lo_delta)
+        covered_call_deltas.append(covered_call_delta)
+        spread_delta_per_unit.append(round(one_spread_delta, 5))
+        long_call_spread_total_delta.append(round(total_spread_delta, 4))
+        covered_call_delta_contributions.append(
+            round(covered_call_delta_contribution, 4)
+        )
+        total_position_deltas.append(round(total_position_delta, 4))
+
     excel_rows = {
         f"Call bought: {long_strike:.0f}": term_df["Call Bought Premium"].tolist(),
         f"Call sold: {short_strike:.0f}": term_df["Call Sold Premium"].tolist(),
@@ -245,7 +313,15 @@ def build_excel_style_table(
         "Combined value": combined_values,
         "Return": [f"{v}%" for v in returns],
         "Return/DTE": [f"{v}%" for v in returns_per_dte],
-        "Return/Marginal DTE": [f"{v}%" for v in returns_per_marginal_dte]
+        "Return/Marginal DTE": [f"{v}%" for v in returns_per_marginal_dte],
+        f"Delta - {short_strike:.0f} call (Hi)": hi_deltas,
+        f"Delta - {long_strike:.0f} call (Lo)": lo_deltas,
+        f"Delta - {covered_call_strike:.0f} call (Covered Call)": covered_call_deltas,
+        "Spread Delta (per single spread)": spread_delta_per_unit,
+        "Long Call Spread Delta (total position, x spreads held)": long_call_spread_total_delta,
+        "Covered Call Delta Contribution": covered_call_delta_contributions,
+        "Equity Delta": [1.0] * len(term_df),
+        "Total Position Delta": total_position_deltas
     }
 
     display_df = pd.DataFrame(
@@ -345,7 +421,8 @@ try:
     all_available_expirations = fetch_spread_term_structure(
         ticker_symbol=ticker_symbol,
         long_strike=long_strike,
-        short_strike=short_strike
+        short_strike=short_strike,
+        covered_call_strike=covered_call_strike
     )
 
     expiration_options = [
@@ -353,11 +430,9 @@ try:
         for _, row in all_available_expirations.iterrows()
     ]
 
-    default_selection = (
-        expiration_options[:8]
-        if len(expiration_options) >= 8
-        else expiration_options
-    )
+    # Defaults to showing every available expiration; he can
+    # remove any individually using the "x" on each pill.
+    default_selection = expiration_options
 
     selected_expiration_labels = st.multiselect(
         "Select Expirations to Display",
@@ -396,6 +471,13 @@ try:
         display_df,
         use_container_width=True
     )
+
+    if covered_call_strike != short_strike:
+        st.info(
+            f"Note: your covered call strike (${covered_call_strike:.0f}) "
+            f"is different from the spread's Hi strike (${short_strike:.0f}). "
+            f"The delta section calculates these separately, as it should."
+        )
 
     st.markdown("---")
 
