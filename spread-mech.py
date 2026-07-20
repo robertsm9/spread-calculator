@@ -12,7 +12,7 @@ from io import BytesIO
 # =========================================================
 
 TICKER_SYMBOL = "BE"
-RISK_FREE_RATE = 0.03456  # matches the 3.456 shown in his sheet, as a decimal
+RISK_FREE_RATE = 0.03456  
 
 
 # =========================================================
