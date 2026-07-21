@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 from scipy.stats import norm
 from datetime import datetime
 from io import BytesIO
@@ -18,6 +19,30 @@ RISK_FREE_RATE = 0.03456
 # =========================================================
 # FUNCTIONS
 # =========================================================
+
+def fetch_with_retry(fetch_function, max_retries=3, delay_seconds=5):
+    """
+    Retries a Yahoo Finance call with a delay if rate-limited,
+    instead of failing immediately.
+    """
+
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            return fetch_function()
+        except Exception as e:
+            last_error = e
+            error_text = str(e).lower()
+
+            if "too many requests" in error_text or "rate limit" in error_text:
+                time.sleep(delay_seconds)
+                continue
+            else:
+                raise
+
+    raise last_error
+
 
 def get_mid_price(row):
     bid = row["bid"]
@@ -69,7 +94,7 @@ def calculate_call_delta(spot, strike, dte, iv_percent, risk_free_rate):
     return round(float(delta), 5)
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=7200)
 def fetch_current_price(ticker_symbol):
     ticker = yf.Ticker(ticker_symbol)
     history = ticker.history(period="5d")
@@ -83,7 +108,7 @@ def fetch_current_price(ticker_symbol):
     return round(float(history["Close"].dropna().iloc[-1]), 2)
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=7200)
 def fetch_spread_term_structure(ticker_symbol, long_strike, short_strike, covered_call_strike):
     """
     Pull real, currently-listed prices for the spread's long/short
@@ -422,7 +447,9 @@ st.title("Bloom Energy Spread Calculator")
 ticker_symbol = TICKER_SYMBOL
 
 try:
-    live_price = fetch_current_price(ticker_symbol)
+    live_price = fetch_with_retry(
+        lambda: fetch_current_price(ticker_symbol)
+    )
 
     st.metric("Live Price (Yahoo)", f"${live_price:.2f}")
 
@@ -458,11 +485,13 @@ try:
         st.error("Hi strike must be greater than Lo strike.")
         st.stop()
 
-    all_available_expirations = fetch_spread_term_structure(
-        ticker_symbol=ticker_symbol,
-        long_strike=long_strike,
-        short_strike=short_strike,
-        covered_call_strike=covered_call_strike
+    all_available_expirations = fetch_with_retry(
+        lambda: fetch_spread_term_structure(
+            ticker_symbol=ticker_symbol,
+            long_strike=long_strike,
+            short_strike=short_strike,
+            covered_call_strike=covered_call_strike
+        )
     )
 
     expiration_options = [
@@ -538,4 +567,7 @@ try:
     )
 
 except Exception as e:
-    st.error(f"Error: {e}")
+    st.error(
+        f"Error: {e}\n\nIf this is a rate-limit error from Yahoo "
+        f"Finance, please wait a few minutes and refresh the page."
+    )
